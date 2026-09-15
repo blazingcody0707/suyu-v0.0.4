@@ -47,7 +47,7 @@ jobs:
           # shader step requires by name.
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config ninja-build nasm autoconf \
-            qt6-base-dev qt6-base-private-dev libqt6svg6-dev libqt6charts6-dev \
+            qt6-base-dev qt6-base-dev-tools qt6-base-private-dev libqt6svg6-dev libqt6charts6-dev \
             qt6-multimedia-dev libqt6opengl6-dev glslang-tools \
             libboost-dev libboost-filesystem-dev libboost-context-dev \
             libusb-1.0-0-dev libssl-dev \
@@ -110,11 +110,72 @@ jobs:
           cp LICENSE.txt _pkg/
           if [ -f build/no-jit-audit.txt ]; then cp build/no-jit-audit.txt _pkg/; fi
           tar -czf '${{ matrix.archive }}' -C _pkg .
+
+      - name: Package AppImage
+        if: matrix.variant == 'standard'
+        run: |
+          # 1. Install build targets into AppDir
+          DESTDIR="$PWD/AppDir" ninja -C build install
+          rm -f AppDir/usr/bin/suyu-cmd AppDir/usr/bin/suyu-tester 2>/dev/null || true
+
+          # 2. Setup AppDir root metadata
+          cp dist/dev.suyu_emu.suyu.desktop AppDir/
+          cp dist/suyu.svg AppDir/dev.suyu_emu.suyu.svg
+          cp dist/suyu.svg AppDir/
+
+          # 3. Download official AppImage packaging tools
+          curl -sLO https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -sLO https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          curl -sLO https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x *.AppImage
+
+          # Extract them to run without FUSE in CI
+          ./linuxdeploy-x86_64.AppImage --appimage-extract
+          mv squashfs-root linuxdeploy-bin
+          ./linuxdeploy-plugin-qt-x86_64.AppImage --appimage-extract
+          mv squashfs-root linuxdeploy-qt-bin
+          ./appimagetool-x86_64.AppImage --appimage-extract
+          mv squashfs-root appimagetool-bin
+
+          export PATH="$PWD/linuxdeploy-bin/usr/bin:$PWD/linuxdeploy-qt-bin/usr/bin:$PWD/appimagetool-bin/usr/bin:$PATH"
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export QMAKE=/usr/lib/qt6/bin/qmake
+          export EXTRA_PLATFORM_PLUGINS="libqwayland-egl.so;libqwayland-generic.so"
+
+          # Run linuxdeploy to bundle Qt and generate AppImage
+          linuxdeploy \
+            --appdir AppDir \
+            -d dist/dev.suyu_emu.suyu.desktop \
+            -i dist/suyu.svg \
+            --plugin qt \
+            --output appimage || true
+
+          AI_OUTPUT=$(find . -maxdepth 1 -name "*.AppImage" ! -name "linuxdeploy*" ! -name "appimagetool*" | head -n 1)
+          if [ -n "$AI_OUTPUT" ]; then
+            cp "$AI_OUTPUT" suyu-x86_64.AppImage
+          else
+            # Fallback: create AppRun and bundle via appimagetool
+            cat << 'EOF' > AppDir/AppRun
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "${0}")")"
+export PATH="${HERE}/usr/bin:${PATH}"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="${HERE}/usr/plugins:${QT_PLUGIN_PATH}"
+export QML2_IMPORT_PATH="${HERE}/usr/qml:${QML2_IMPORT_PATH}"
+exec "${HERE}/usr/bin/suyu" "$@"
+EOF
+            chmod +x AppDir/AppRun
+            appimagetool-bin/AppRun AppDir suyu-x86_64.AppImage
+          fi
+          ls -lh *.AppImage
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.variant }}
-          path: ${{ matrix.archive }}
-          if-no-files-found: error
+          path: |
+            ${{ matrix.archive }}
+            *.AppImage
+          if-no-files-found: warn
 
   build-windows:
     name: Windows (${{ matrix.variant }})
